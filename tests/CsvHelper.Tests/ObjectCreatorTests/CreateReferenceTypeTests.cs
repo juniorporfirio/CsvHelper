@@ -1,5 +1,4 @@
-﻿#if !NET45
-using Microsoft.VisualStudio.TestTools.UnitTesting;
+﻿using Microsoft.VisualStudio.TestTools.UnitTesting;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -56,4 +55,3 @@ namespace CsvHelper.Tests.ObjectCreatorTests
 		private class Bar { }
     }
 }
-#endif

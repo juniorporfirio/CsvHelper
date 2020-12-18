@@ -1,5 +1,4 @@
-﻿#if !NET45
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Linq.Expressions;
@@ -15,7 +14,8 @@ namespace CsvHelper
 	/// </summary>
 	public class ObjectCreator
     {
-		private readonly CreateInstanceFuncCache cache = new CreateInstanceFuncCache();
+		private Dictionary<int, Func<object[], object>[]> funcCache = new Dictionary<int, Func<object[], object>[]>();
+		private Dictionary<int, Constructors> constructorCache = new Dictionary<int, Constructors>();
 
 		/// <summary>
 		/// Creates an instance of type T using the given arguments.
@@ -34,10 +34,80 @@ namespace CsvHelper
 		/// <param name="args">The constructor arguments.</param>
 		public object CreateInstance(Type type, params object[] args)
 		{
-			var func = cache.GetFunc(type, args);
+			var func = GetFunc(type, args);
 
 			return func(args);
 		}
+
+		[MethodImpl(MethodImplOptions.AggressiveInlining)]
+		private Func<object[], object> GetFunc(Type type, object[] args)
+		{
+			var funcCacheKey = GetFuncCacheKey(type, args.Length);
+
+			if (!funcCache.TryGetValue(funcCacheKey, out var funcs))
+			{
+				// If the cache doesn't exist for one type/signature combo, it doesn't for any of that type.
+				CreateCaches(type);
+				funcs = funcCache[funcCacheKey];
+			}
+
+			if (funcs.Length == 1)
+			{
+				return funcs[0];
+			}
+
+			// There is more than one constructor that matches the arg count.
+			// We need to match up the signatures.
+
+			var constructorCacheKey = GetConstructorCacheKey(type);
+			var constructors = constructorCache[constructorCacheKey];
+			var constructor = constructors.GetConstructor(args);
+
+			return constructor.Func;
+		}
+
+		[MethodImpl(MethodImplOptions.AggressiveInlining)]
+		private void CreateCaches(Type type)
+		{
+			var constructors = new Constructors(type);
+
+			// Generate func cache.
+			foreach (var pair in constructors.ByParameterCount)
+			{
+				var funcs = new Func<object[], object>[pair.Value.Count];
+				for (var i = 0; i < pair.Value.Count; i++)
+				{
+					funcs[i] = pair.Value[i].Func;
+				}
+
+				var funcCacheKey = GetFuncCacheKey(type, pair.Key);
+				funcCache[funcCacheKey] = funcs;
+			}
+
+			// Generate constructor cache.
+			var constructorCacheKey = GetConstructorCacheKey(type);
+			constructorCache[constructorCacheKey] = constructors;
+		}
+
+		[MethodImpl(MethodImplOptions.AggressiveInlining)]
+		private static int GetFuncCacheKey(Type type, int argsCount)
+#if !NET45
+			=> HashCode.Combine(type, argsCount);
+#else
+		{
+			unchecked
+			{
+				var hash = 17;
+				hash = hash * 31 + type.GetHashCode();
+				hash = hash * 31 + argsCount.GetHashCode();
+
+				return hash;
+			}
+		}
+#endif
+
+		[MethodImpl(MethodImplOptions.AggressiveInlining)]
+		private static int GetConstructorCacheKey(Type type) => type.GetHashCode();
 
 		private static Func<object[], object> CreateInstanceFunc(Type type, Type[] parameterTypes)
 		{
@@ -61,72 +131,11 @@ namespace CsvHelper
 			return func;
 		}
 
-		private class CreateInstanceFuncCache
+		private class Constructors
 		{
-			private Dictionary<int, Func<object[], object>[]> funcCache = new Dictionary<int, Func<object[], object>[]>();
-			private Dictionary<int, ConstructorCollection> constructorCache = new Dictionary<int, ConstructorCollection>();
+			public readonly Dictionary<int, List<Constructor>> ByParameterCount = new Dictionary<int, List<Constructor>>();
 
-			public Func<object[], object> GetFunc(Type type, object[] args)
-			{
-				var funcCacheKey = GetFuncCacheKey(type, args.Length);
-
-				if (!funcCache.TryGetValue(funcCacheKey, out var funcs))
-				{
-					// If the cache doesn't exist for one type/signature combo, it doesn't for any of that type.
-					CreateCaches(type);
-					funcs = funcCache[funcCacheKey];
-				}
-
-				if (funcs.Length == 1)
-				{
-					return funcs[0];
-				}
-
-				// There is more than one constructor that matches the arg count.
-				// We need to match up the signatures.
-
-				var constructorCacheKey = GetConstructorCacheKey(type);
-				var constructors = constructorCache[constructorCacheKey];
-				var constructor = constructors.GetConstructor(args);
-
-				return constructor.Func;
-			}
-
-			[MethodImpl(MethodImplOptions.AggressiveInlining)]
-			private void CreateCaches(Type type)
-			{
-				var constructors = new ConstructorCollection(type);
-
-				// Generate func cache.
-				foreach (var pair in constructors.ConstructorsByParameterCount)
-				{
-					var funcs = new Func<object[], object>[pair.Value.Count];
-					for (var i = 0; i < pair.Value.Count; i++)
-					{
-						funcs[i] = pair.Value[i].Func;
-					}
-
-					var funcCacheKey = GetFuncCacheKey(type, pair.Key);
-					funcCache[funcCacheKey] = funcs;
-				}
-
-				// Generate constructor cache.
-				var constructorCacheKey = GetConstructorCacheKey(type);
-				constructorCache[constructorCacheKey] = constructors;
-			}
-
-			[MethodImpl(MethodImplOptions.AggressiveInlining)]
-			private static int GetFuncCacheKey(Type type, int argsCount) => HashCode.Combine(type, argsCount);
-
-			[MethodImpl(MethodImplOptions.AggressiveInlining)]
-			private static int GetConstructorCacheKey(Type type) => type.GetHashCode();
-		}
-
-		private class ConstructorCollection
-		{
-			public readonly Dictionary<int, List<Constructor>> ConstructorsByParameterCount = new Dictionary<int, List<Constructor>>();
-
-			public ConstructorCollection(Type type)
+			public Constructors(Type type)
 			{
 				var constructorInfos = type.GetConstructors(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
 
@@ -135,19 +144,19 @@ namespace CsvHelper
 					var constructor = new Constructor(type, constructorInfos[i]);
 
 					var key = constructor.ParameterTypes.Length;
-					if (!ConstructorsByParameterCount.ContainsKey(key))
+					if (!ByParameterCount.ContainsKey(key))
 					{
-						ConstructorsByParameterCount[key] = new List<Constructor>();
+						ByParameterCount[key] = new List<Constructor>();
 					}
 
-					ConstructorsByParameterCount[key].Add(constructor);
+					ByParameterCount[key].Add(constructor);
 				}
 			}
 
 			public Constructor GetConstructor(object[] args)
 			{
 				var key = args.Length;
-				var constructors = ConstructorsByParameterCount[key];
+				var constructors = ByParameterCount[key];
 				if (constructors.Count == 1)
 				{
 					return constructors[0];
@@ -241,4 +250,3 @@ namespace CsvHelper
 		}
 	}
 }
-#endif
