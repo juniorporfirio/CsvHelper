@@ -14,8 +14,9 @@ namespace CsvHelper
 	/// </summary>
 	public class ObjectCreator
     {
-		private Dictionary<int, Func<object[], object>[]> funcCache = new Dictionary<int, Func<object[], object>[]>();
-		private Dictionary<int, Constructors> constructorCache = new Dictionary<int, Constructors>();
+		private readonly Dictionary<int, Constructor[]> constructorCache = new Dictionary<int, Constructor[]>();
+		private readonly HashSet<int> cachedTypes = new HashSet<int>();
+		private static readonly int objectHashCode = typeof(object).GetHashCode();
 
 		/// <summary>
 		/// Creates an instance of type T using the given arguments.
@@ -42,59 +43,33 @@ namespace CsvHelper
 		[MethodImpl(MethodImplOptions.AggressiveInlining)]
 		private Func<object[], object> GetFunc(Type type, object[] args)
 		{
-			var funcCacheKey = GetFuncCacheKey(type, args.Length);
-
-			if (!funcCache.TryGetValue(funcCacheKey, out var funcs))
+			var key = GetConstructorCacheKey(type, args.Length);
+			if (!constructorCache.TryGetValue(key, out var constructors))
 			{
-				// If the cache doesn't exist for one type/signature combo, it doesn't for any of that type.
-				CreateCaches(type);
-				funcs = funcCache[funcCacheKey];
+				if (!cachedTypes.Contains(type.GetHashCode()))
+				{
+					CreateCache(type);
+				}
+
+				if (!constructorCache.ContainsKey(key))
+				{
+					throw GetConstructorNotFoundException(type, args);
+				}
+
+				constructors = constructorCache[key];
 			}
 
-			if (funcs.Length == 1)
-			{
-				return funcs[0];
-			}
-
-			// There is more than one constructor that matches the arg count.
-			// We need to match up the signatures.
-
-			var constructorCacheKey = GetConstructorCacheKey(type);
-			var constructors = constructorCache[constructorCacheKey];
-			var constructor = constructors.GetConstructor(args);
+			var constructor = GetConstructor(constructors, type, args);
 
 			return constructor.Func;
 		}
 
 		[MethodImpl(MethodImplOptions.AggressiveInlining)]
-		private void CreateCaches(Type type)
-		{
-			var constructors = new Constructors(type);
-
-			// Generate func cache.
-			foreach (var pair in constructors.ByParameterCount)
-			{
-				var funcs = new Func<object[], object>[pair.Value.Count];
-				for (var i = 0; i < pair.Value.Count; i++)
-				{
-					funcs[i] = pair.Value[i].Func;
-				}
-
-				var funcCacheKey = GetFuncCacheKey(type, pair.Key);
-				funcCache[funcCacheKey] = funcs;
-			}
-
-			// Generate constructor cache.
-			var constructorCacheKey = GetConstructorCacheKey(type);
-			constructorCache[constructorCacheKey] = constructors;
-		}
-
-		[MethodImpl(MethodImplOptions.AggressiveInlining)]
-		private static int GetFuncCacheKey(Type type, int argsCount)
+		private static int GetConstructorCacheKey(Type type, int argsCount)
+		{ 
 #if !NET45
-			=> HashCode.Combine(type, argsCount);
+			return HashCode.Combine(type, argsCount);
 #else
-		{
 			unchecked
 			{
 				var hash = 17;
@@ -103,12 +78,10 @@ namespace CsvHelper
 
 				return hash;
 			}
-		}
 #endif
+		}
 
 		[MethodImpl(MethodImplOptions.AggressiveInlining)]
-		private static int GetConstructorCacheKey(Type type) => type.GetHashCode();
-
 		private static Func<object[], object> CreateInstanceFunc(Type type, Type[] parameterTypes)
 		{
 			var constructor = type.GetConstructor(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance, null, parameterTypes, null);
@@ -131,121 +104,125 @@ namespace CsvHelper
 			return func;
 		}
 
-		private class Constructors
+		[MethodImpl(MethodImplOptions.AggressiveInlining)]
+		private void CreateCache(Type type)
 		{
-			public readonly Dictionary<int, List<Constructor>> ByParameterCount = new Dictionary<int, List<Constructor>>();
+			var constructors = type.GetConstructors(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
 
-			public Constructors(Type type)
+			var cache = new Dictionary<int, List<Constructor>>();
+			for (var i = 0; i < constructors.Length; i++)
 			{
-				var constructorInfos = type.GetConstructors(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+				var constructor = new Constructor(type, constructors[i]);
 
-				for (var i = 0; i < constructorInfos.Length; i++)
+				var key = GetConstructorCacheKey(type, constructor.ParameterTypeHashCodes.Length);
+				if (!cache.ContainsKey(key))
 				{
-					var constructor = new Constructor(type, constructorInfos[i]);
+					cache[key] = new List<Constructor>();
+				}
 
-					var key = constructor.ParameterTypes.Length;
-					if (!ByParameterCount.ContainsKey(key))
+				cache[key].Add(constructor);
+			}
+
+			foreach (var pair in cache)
+			{
+				constructorCache[pair.Key] = pair.Value.ToArray();
+			}
+
+			cachedTypes.Add(type.GetHashCode());
+		}
+
+		[MethodImpl(MethodImplOptions.AggressiveInlining)]
+		private Constructor GetConstructor(Constructor[] constructors, Type type, object[] args)
+		{
+			// Match the signature.
+
+			var argsTypes = new int[args.Length];
+			for (var i = 0; i < args.Length; i++)
+			{
+				argsTypes[i] = args[i]?.GetType().GetHashCode() ?? objectHashCode;
+			}
+
+			var fuzzyMatches = new List<Constructor>();
+			for (var i = 0; i < constructors.Length; i++)
+			{
+				var constructor = constructors[i];
+				var matchType = MatchType.Exact;
+
+				for (var j = 0; j < args.Length; j++)
+				{
+					var parameterType = constructor.ParameterTypeHashCodes[j];
+					var argType = argsTypes[j];
+					if (args[j] != null && parameterType == argType)
 					{
-						ByParameterCount[key] = new List<Constructor>();
+						continue;
 					}
 
-					ByParameterCount[key].Add(constructor);
+					if (args[j] == null && parameterType == objectHashCode)
+					{
+						matchType = MatchType.Fuzzy;
+						continue;
+					}
+
+					matchType = MatchType.None;
+					break;
+				}
+
+				if (matchType == MatchType.Exact)
+				{
+					// It's only possible to have a single exact match.
+					return constructor;
+				}
+
+				if (matchType == MatchType.Fuzzy)
+				{
+					fuzzyMatches.Add(constructor);
 				}
 			}
 
-			public Constructor GetConstructor(object[] args)
+			if (fuzzyMatches.Count == 1)
 			{
-				var key = args.Length;
-				var constructors = ByParameterCount[key];
-				if (constructors.Count == 1)
-				{
-					return constructors[0];
-				}
-
-				// There is more than one constructor with the same amount of parameters.
-				// Match against the types.
-
-				var argsTypes = new Type[args.Length];
-				for (var i = 0; i < args.Length; i++)
-				{
-					argsTypes[i] = args[i]?.GetType() ?? typeof(object);
-				}
-
-				var fuzzyMatches = new List<Constructor>();
-				for (var i = 0; i < constructors.Count; i++)
-				{
-					var constructor = constructors[i];
-					var matchType = MatchType.Exact;
-
-					for (var j = 0; j < args.Length; j++)
-					{
-						var parameterType = constructor.ParameterTypes[j];
-						var argType = argsTypes[j];
-						if (args[j] != null && parameterType == argType)
-						{
-							continue;
-						}
-
-						if (args[j] == null && !parameterType.IsValueType)
-						{
-							matchType = MatchType.Fuzzy;
-							continue;
-						}
-
-						matchType = MatchType.None;
-						break;
-					}
-
-					if (matchType == MatchType.Exact)
-					{
-						// It's only possible to have a single exact match.
-						return constructor;
-					}
-
-					if (matchType == MatchType.Fuzzy)
-					{
-						fuzzyMatches.Add(constructor);
-					}
-				}
-
-				if (fuzzyMatches.Count == 1)
-				{
-					return fuzzyMatches[0];
-				}
-
-				if (fuzzyMatches.Count > 1)
-				{
-					throw new AmbiguousMatchException();
-				}
-
-				throw new InvalidOperationException("There is no constructor signature that matches the given args.");
+				return fuzzyMatches[0];
 			}
 
-			private enum MatchType
+			if (fuzzyMatches.Count > 1)
 			{
-				None = 0,
-				Exact = 1,
-				Fuzzy = 2,
+				throw new AmbiguousMatchException();
 			}
+
+			throw GetConstructorNotFoundException(type, args);
+		}
+
+		private MissingMethodException GetConstructorNotFoundException(Type type, object[] args)
+		{
+			var signature = $"{type.FullName}({string.Join(", ", args.Select(a => (a?.GetType() ?? typeof(object)).FullName))})";
+			return new MissingMethodException($"Constructor '{signature}' was not found.");
+		}
+
+		private enum MatchType
+		{
+			None = 0,
+			Exact = 1,
+			Fuzzy = 2,
 		}
 
 		private class Constructor
 		{
 			public Func<object[], object> Func { get; private set; }
 
-			public Type[] ParameterTypes { get; private set; }
+			public int[] ParameterTypeHashCodes { get; private set; }
 
 			public Constructor(Type type, ConstructorInfo constructor)
 			{
 				var parameters = constructor.GetParameters();
-				ParameterTypes = new Type[parameters.Length];
-
+				var parameterTypes = new Type[parameters.Length];
+				ParameterTypeHashCodes = new int[parameters.Length];
 				for (var i = 0; i < parameters.Length; i++)
 				{
-					ParameterTypes[i] = parameters[i].ParameterType;
+					parameterTypes[i] = parameters[i].ParameterType;
+					ParameterTypeHashCodes[i] = parameters[i].ParameterType.GetHashCode();
 				}
 
-				Func = CreateInstanceFunc(type, ParameterTypes);
+				Func = CreateInstanceFunc(type, parameterTypes);
 			}
 		}
 	}
