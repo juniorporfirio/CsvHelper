@@ -14,7 +14,7 @@ namespace CsvHelper
 	/// </summary>
 	public class ObjectCreator
     {
-		private readonly Dictionary<int, Constructor[]> constructorCache = new Dictionary<int, Constructor[]>();
+		private readonly Dictionary<int, Constructor[]> cache = new Dictionary<int, Constructor[]>();
 		private readonly HashSet<int> cachedTypes = new HashSet<int>();
 		private static readonly int objectHashCode = typeof(object).GetHashCode();
 
@@ -44,19 +44,19 @@ namespace CsvHelper
 		private Func<object[], object> GetFunc(Type type, object[] args)
 		{
 			var key = GetConstructorCacheKey(type, args.Length);
-			if (!constructorCache.TryGetValue(key, out var constructors))
+			if (!cache.TryGetValue(key, out var constructors))
 			{
 				if (!cachedTypes.Contains(type.GetHashCode()))
 				{
 					CreateCache(type);
 				}
 
-				if (!constructorCache.ContainsKey(key))
+				if (!cache.ContainsKey(key))
 				{
 					throw GetConstructorNotFoundException(type, args);
 				}
 
-				constructors = constructorCache[key];
+				constructors = cache[key];
 			}
 
 			var constructor = GetConstructor(constructors, type, args);
@@ -125,7 +125,7 @@ namespace CsvHelper
 
 			foreach (var pair in cache)
 			{
-				constructorCache[pair.Key] = pair.Value.ToArray();
+				this.cache[pair.Key] = pair.Value.ToArray();
 			}
 
 			cachedTypes.Add(type.GetHashCode());
@@ -136,10 +136,10 @@ namespace CsvHelper
 		{
 			// Match the signature.
 
-			var argsTypes = new int[args.Length];
+			var argsTypeHashCodes = new int[args.Length];
 			for (var i = 0; i < args.Length; i++)
 			{
-				argsTypes[i] = args[i]?.GetType().GetHashCode() ?? objectHashCode;
+				argsTypeHashCodes[i] = args[i]?.GetType().GetHashCode() ?? objectHashCode;
 			}
 
 			var fuzzyMatches = new List<Constructor>();
@@ -151,7 +151,7 @@ namespace CsvHelper
 				for (var j = 0; j < args.Length; j++)
 				{
 					var parameterType = constructor.ParameterTypeHashCodes[j];
-					var argType = argsTypes[j];
+					var argType = argsTypeHashCodes[j];
 					if (args[j] != null && parameterType == argType)
 					{
 						continue;
@@ -192,6 +192,7 @@ namespace CsvHelper
 			throw GetConstructorNotFoundException(type, args);
 		}
 
+		[MethodImpl(MethodImplOptions.AggressiveInlining)]
 		private MissingMethodException GetConstructorNotFoundException(Type type, object[] args)
 		{
 			var signature = $"{type.FullName}({string.Join(", ", args.Select(a => (a?.GetType() ?? typeof(object)).FullName))})";
