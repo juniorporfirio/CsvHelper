@@ -65,6 +65,42 @@ namespace CsvHelper
 		}
 
 		[MethodImpl(MethodImplOptions.AggressiveInlining)]
+		private void CreateCache(Type type)
+		{
+			if (type.IsValueType)
+			{
+				var key = GetConstructorCacheKey(type, 0);
+				var constructor = new Constructor(type, null);
+				cache[key] = new Constructor[] { constructor };
+			}
+			else
+			{
+				var constructors = type.GetConstructors(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+
+				var cache = new Dictionary<int, List<Constructor>>();
+				for (var i = 0; i < constructors.Length; i++)
+				{
+					var constructor = new Constructor(type, constructors[i]);
+
+					var key = GetConstructorCacheKey(type, constructor.ParameterTypeHashCodes.Length);
+					if (!cache.ContainsKey(key))
+					{
+						cache[key] = new List<Constructor>();
+					}
+
+					cache[key].Add(constructor);
+				}
+
+				foreach (var pair in cache)
+				{
+					this.cache[pair.Key] = pair.Value.ToArray();
+				}
+			}
+
+			cachedTypes.Add(type.GetHashCode());
+		}
+
+		[MethodImpl(MethodImplOptions.AggressiveInlining)]
 		private static int GetConstructorCacheKey(Type type, int argsCount)
 		{ 
 #if !NET45
@@ -84,55 +120,37 @@ namespace CsvHelper
 		[MethodImpl(MethodImplOptions.AggressiveInlining)]
 		private static Func<object[], object> CreateInstanceFunc(Type type, Type[] parameterTypes)
 		{
-			var constructor = type.GetConstructor(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance, null, parameterTypes, null);
-
 			var parameterExpression = Expression.Parameter(typeof(object[]), "args");
 
-			var arguments = new List<Expression>();
-			for (var i = 0; i < parameterTypes.Length; i++)
+			Expression body;
+			if (type.IsValueType)
 			{
-				var parameterType = parameterTypes[i];
-				var arrayIndexExpression = Expression.ArrayIndex(parameterExpression, Expression.Constant(i));
-				var convertExpression = Expression.Convert(arrayIndexExpression, parameterType);
-				arguments.Add(convertExpression);
+				body = Expression.Convert(Expression.Default(type), typeof(object));
+			}
+			else
+			{
+				var constructor = type.GetConstructor(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance, null, parameterTypes, null);
+
+				var arguments = new List<Expression>();
+				for (var i = 0; i < parameterTypes.Length; i++)
+				{
+					var parameterType = parameterTypes[i];
+					var arrayIndexExpression = Expression.ArrayIndex(parameterExpression, Expression.Constant(i));
+					var convertExpression = Expression.Convert(arrayIndexExpression, parameterType);
+					arguments.Add(convertExpression);
+				}
+
+				body = Expression.New(constructor, arguments);
 			}
 
-			var constructorExpression = Expression.New(constructor, arguments);
-			var lambda = Expression.Lambda<Func<object[], object>>(constructorExpression, new[] { parameterExpression });
+			var lambda = Expression.Lambda<Func<object[], object>>(body, new[] { parameterExpression });
 			var func = lambda.Compile();
 
 			return func;
 		}
 
 		[MethodImpl(MethodImplOptions.AggressiveInlining)]
-		private void CreateCache(Type type)
-		{
-			var constructors = type.GetConstructors(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-
-			var cache = new Dictionary<int, List<Constructor>>();
-			for (var i = 0; i < constructors.Length; i++)
-			{
-				var constructor = new Constructor(type, constructors[i]);
-
-				var key = GetConstructorCacheKey(type, constructor.ParameterTypeHashCodes.Length);
-				if (!cache.ContainsKey(key))
-				{
-					cache[key] = new List<Constructor>();
-				}
-
-				cache[key].Add(constructor);
-			}
-
-			foreach (var pair in cache)
-			{
-				this.cache[pair.Key] = pair.Value.ToArray();
-			}
-
-			cachedTypes.Add(type.GetHashCode());
-		}
-
-		[MethodImpl(MethodImplOptions.AggressiveInlining)]
-		private Constructor GetConstructor(Constructor[] constructors, Type type, object[] args)
+		private static Constructor GetConstructor(Constructor[] constructors, Type type, object[] args)
 		{
 			// Match the signature.
 
@@ -154,15 +172,18 @@ namespace CsvHelper
 					var argType = argsTypeHashCodes[j];
 					if (args[j] != null && parameterType == argType)
 					{
+						// Constructor parameter and arg types match exactly.
 						continue;
 					}
 
-					if (args[j] == null && parameterType == objectHashCode)
+					if (args[j] == null && !constructor.ParameterTypes[j].IsValueType)
 					{
+						// Constructor parameter is reference type and arg is null.
 						matchType = MatchType.Fuzzy;
 						continue;
 					}
 
+					// Constructor parameter type dosn't match arg type.
 					matchType = MatchType.None;
 					break;
 				}
@@ -193,7 +214,7 @@ namespace CsvHelper
 		}
 
 		[MethodImpl(MethodImplOptions.AggressiveInlining)]
-		private MissingMethodException GetConstructorNotFoundException(Type type, object[] args)
+		private static MissingMethodException GetConstructorNotFoundException(Type type, object[] args)
 		{
 			var signature = $"{type.FullName}({string.Join(", ", args.Select(a => (a?.GetType() ?? typeof(object)).FullName))})";
 			return new MissingMethodException($"Constructor '{signature}' was not found.");
@@ -210,20 +231,32 @@ namespace CsvHelper
 		{
 			public Func<object[], object> Func { get; private set; }
 
+			public Type[] ParameterTypes { get; private set; }
+
 			public int[] ParameterTypeHashCodes { get; private set; }
 
 			public Constructor(Type type, ConstructorInfo constructor)
 			{
-				var parameters = constructor.GetParameters();
-				var parameterTypes = new Type[parameters.Length];
-				ParameterTypeHashCodes = new int[parameters.Length];
-				for (var i = 0; i < parameters.Length; i++)
+				if (type.IsValueType)
 				{
-					parameterTypes[i] = parameters[i].ParameterType;
-					ParameterTypeHashCodes[i] = parameters[i].ParameterType.GetHashCode();
+					ParameterTypes = new Type[0];
+					ParameterTypeHashCodes = new int[0];
+				}
+				else
+				{
+					var parameters = constructor.GetParameters();
+
+					ParameterTypes = new Type[parameters.Length];
+					ParameterTypeHashCodes = new int[parameters.Length];
+
+					for (var i = 0; i < parameters.Length; i++)
+					{
+						ParameterTypes[i] = parameters[i].ParameterType;
+						ParameterTypeHashCodes[i] = parameters[i].ParameterType.GetHashCode();
+					}
 				}
 
-				Func = CreateInstanceFunc(type, parameterTypes);
+				Func = CreateInstanceFunc(type, ParameterTypes);
 			}
 		}
 	}
