@@ -1,7 +1,9 @@
 assembly-versioning-scheme: Major
-assembly-file-versioning-scheme: MajorMinorPatch
+assembly-file-versioning-format: '{Major}.{Minor}.{Patch}.{env:BUILD_NUMBER ?? 0}'
 mode: Mainline
-branches: {}
+branches:
+  fast-object-creator:
+	mode: ContinuousDelivery
 ignore:
   sha: []
 merge-message-formats: {}
