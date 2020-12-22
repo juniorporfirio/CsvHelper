@@ -1,9 +1,13 @@
+next-version: 19.0.0
 assembly-versioning-scheme: Major
 assembly-file-versioning-format: '{Major}.{Minor}.{Patch}.{env:BUILD_NUMBER ?? 0}'
 mode: Mainline
 branches:
   fast-object-creator:
-	mode: ContinuousDelivery
+    tag: beta
+    regex: fast-object-creator
+    mode: ContinuousDelivery
+    source-branches: ['master']
 ignore:
   sha: []
 merge-message-formats: {}
