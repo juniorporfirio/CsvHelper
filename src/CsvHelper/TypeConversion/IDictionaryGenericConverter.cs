@@ -26,7 +26,7 @@ namespace CsvHelper.TypeConversion
 			var valueType = memberMapData.Member.MemberType().GetGenericArguments()[1];
 			var dictionaryType = typeof(Dictionary<,>);
 			dictionaryType = dictionaryType.MakeGenericType(keyType, valueType);
-			var dictionary = (IDictionary)ReflectionHelper.CreateInstance(dictionaryType);
+			var dictionary = (IDictionary)row.Context.ObjectResolver.Resolve(dictionaryType);
 
 			var indexEnd = memberMapData.IndexEnd < memberMapData.Index
 				? row.Context.Record.Length - 1

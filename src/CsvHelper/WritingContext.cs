@@ -24,6 +24,11 @@ namespace CsvHelper
 		private Configuration.CsvConfiguration configuration;
 
 		/// <summary>
+		/// The <see cref="ObjectResolver"/> instance to use to resolve objects.
+		/// </summary>
+		public IObjectResolver ObjectResolver { get; set; } = new ObjectResolver();
+
+		/// <summary>
 		/// Gets the type actions.
 		/// </summary>
 		public Dictionary<int, Delegate> TypeActions { get; } = new Dictionary<int, Delegate>();

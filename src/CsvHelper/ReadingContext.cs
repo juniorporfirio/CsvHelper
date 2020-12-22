@@ -20,6 +20,11 @@ namespace CsvHelper
 		private readonly Configuration.CsvConfiguration configuration;
 
 		/// <summary>
+		/// The <see cref="ObjectResolver"/> instance to use to resolve objects.
+		/// </summary>
+		public IObjectResolver ObjectResolver { get; set; } = new ObjectResolver();
+
+		/// <summary>
 		/// Gets the raw record builder.
 		/// </summary>
 		public StringBuilder RawRecordBuilder = new StringBuilder();

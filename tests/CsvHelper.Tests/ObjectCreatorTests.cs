@@ -1,8 +1,13 @@
-﻿using Microsoft.VisualStudio.TestTools.UnitTesting;
+﻿using CsvHelper.Configuration;
+using Microsoft.VisualStudio.TestTools.UnitTesting;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
+using System.Globalization;
+using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Reflection.Emit;
 using System.Text;
 using System.Threading.Tasks;
 
@@ -319,5 +324,312 @@ namespace CsvHelper.Tests.ObjectCreatorTests
 		}
 
 		private class Bar { }
+	}
+
+	[TestClass]
+	public class CreateInstance_PrivateConstructor
+	{
+		[TestMethod]
+		public void CreatesInstance()
+		{
+			var creator = new ObjectCreator();
+
+			var foo = creator.CreateInstance<Foo>();
+
+			Assert.IsInstanceOfType(foo, typeof(Foo));
+		}
+
+		private class Foo
+		{
+			private Foo() { }
+		}
+	}
+
+	//[TestClass]
+	public class CreateInstance_GenericType
+	{
+		[TestMethod]
+		public void Test1()
+		{
+			var creator = new ObjectCreator();
+
+			creator.CreateInstance<Foo<string>>();
+		}
+
+		private static object RunGenericCreateInstance(Type type)
+		{
+			var methodInfo = typeof(ReflectionHelper)
+				.GetMethods(BindingFlags.Public | BindingFlags.Static)
+				.FirstOrDefault(m => m.Name.Equals(@"CreateInstance", StringComparison.Ordinal) && m.IsGenericMethod)?
+				.MakeGenericMethod(type);
+
+			return methodInfo.Invoke(null, new[] { new object[0] });
+		}
+
+		private class Foo<T> { }
+	}
+
+	//[TestClass]
+	public class CreateInstance_DynamicType
+	{
+		[TestMethod]
+		public void DifferentRunTimeTypesWithSameAssemblyQualifiedNameTest()
+		{
+			var creator = new ObjectCreator();
+
+			Type type1 = GenerateDynamicType();
+			Type type2 = GenerateDynamicType();
+
+			Debug.Assert(type1.AssemblyQualifiedName.Equals(type2.AssemblyQualifiedName, StringComparison.Ordinal), @"The two generated dynamic types should have same assembly qualified name.");
+			Debug.Assert(type1.GetHashCode() != type2.GetHashCode(), @"The two generated dynamic types should have different hash codes.");
+
+			var instance1 = creator.CreateInstance(type1);
+
+			Assert.IsNotNull(instance1);
+			Assert.IsInstanceOfType(instance1, type1);
+			Assert.IsNotInstanceOfType(instance1, type2);
+
+			var instance2 = creator.CreateInstance(type2);
+
+			Assert.IsNotNull(instance2);
+			Assert.IsInstanceOfType(instance2, type2);
+			Assert.IsNotInstanceOfType(instance2, type1);
+
+			instance1 = RunGenericCreateInstance(type1);
+
+			Assert.IsNotNull(instance1);
+			Assert.IsInstanceOfType(instance1, type1);
+			Assert.IsNotInstanceOfType(instance1, type2);
+
+			instance2 = RunGenericCreateInstance(type2);
+
+			Assert.IsNotNull(instance2);
+			Assert.IsInstanceOfType(instance2, type2);
+			Assert.IsNotInstanceOfType(instance2, type1);
+		}
+
+		private static object RunGenericCreateInstance(Type type)
+		{
+			var methodInfo = typeof(ReflectionHelper)
+				.GetMethods(BindingFlags.Public | BindingFlags.Static)
+				.FirstOrDefault(m => m.Name.Equals(@"CreateInstance", StringComparison.Ordinal) && m.IsGenericMethod)?
+				.MakeGenericMethod(type);
+
+			Debug.Assert(methodInfo != null, "The generic method instance should not be null.");
+
+			return methodInfo.Invoke(null, new[] { new object[0] });
+		}
+
+		private static Type GenerateDynamicType()
+		{
+			var assemblyName = new AssemblyName("DynamicAssemblyForCsvHelperTest");
+			var assemblyBuilder = AssemblyBuilder.DefineDynamicAssembly(assemblyName, AssemblyBuilderAccess.Run);
+			var moduleBuilder = assemblyBuilder.DefineDynamicModule(assemblyName.Name);
+			var typeBuilder = moduleBuilder.DefineType("DynamicTypeForCsvHelperTest", TypeAttributes.Public);
+
+			return typeBuilder.CreateType();
+		}
+	}
+
+	//[TestClass]
+	public class ResolveInterfacesTests
+	{
+		[TestMethod]
+		public void InterfaceReferenceMappingTest()
+		{
+			using (var stream = new MemoryStream())
+			using (var writer = new StreamWriter(stream))
+			using (var reader = new StreamReader(stream))
+			using (var csv = new CsvReader(reader, CultureInfo.InvariantCulture))
+			{
+				csv.Context.ObjectResolver = new TestContractResolver();
+				csv.Configuration.Delimiter = ",";
+				writer.WriteLine("AId,BId,CId,DId");
+				writer.WriteLine("1,2,3,4");
+				writer.Flush();
+				stream.Position = 0;
+
+				csv.Configuration.RegisterClassMap<AMap>();
+				var records = csv.GetRecords<IA>().ToList();
+			}
+		}
+
+		[TestMethod]
+		public void InterfacePropertySubMappingTest()
+		{
+			using (var stream = new MemoryStream())
+			using (var writer = new StreamWriter(stream))
+			using (var reader = new StreamReader(stream))
+			using (var csv = new CsvReader(reader, CultureInfo.InvariantCulture))
+			{
+				csv.Context.ObjectResolver = new TestContractResolver();
+				csv.Configuration.Delimiter = ",";
+				writer.WriteLine("AId,BId,CId,DId");
+				writer.WriteLine("1,2,3,4");
+				writer.Flush();
+				stream.Position = 0;
+
+				csv.Configuration.RegisterClassMap<ASubPropertyMap>();
+				var records = csv.GetRecords<IA>().ToList();
+			}
+		}
+
+		[TestMethod]
+		public void InterfaceAutoMappingTest()
+		{
+			using (var stream = new MemoryStream())
+			using (var writer = new StreamWriter(stream))
+			using (var reader = new StreamReader(stream))
+			using (var csv = new CsvReader(reader, CultureInfo.InvariantCulture))
+			{
+				csv.Context.ObjectResolver = new TestContractResolver();
+				csv.Configuration.Delimiter = ",";
+				writer.WriteLine("AId,BId,CId,DId");
+				writer.WriteLine("1,2,3,4");
+				writer.Flush();
+				stream.Position = 0;
+
+				var records = csv.GetRecords<IA>().ToList();
+			}
+		}
+
+		private class TestContractResolver : IObjectResolver
+		{
+			private readonly ObjectCreator objectCreator = new ObjectCreator();
+
+			public Func<Type, bool> CanResolve { get; set; }
+
+			public Func<Type, object[], object> ResolveFunction { get; set; }
+
+			public bool UseFallback { get; set; }
+
+			public object Resolve(Type type, params object[] constructorArgs)
+			{
+				if (type == typeof(IA))
+				{
+					return new A();
+				}
+
+				if (type == typeof(IB))
+				{
+					return new B();
+				}
+
+				if (type == typeof(IC))
+				{
+					return new C();
+				}
+
+				if (type == typeof(ID))
+				{
+					return new D();
+				}
+
+				return objectCreator.CreateInstance(type, constructorArgs);
+			}
+
+			public T Resolve<T>(params object[] constructorArgs)
+			{
+				return (T)Resolve(typeof(T), constructorArgs);
+			}
+		}
+
+		private interface IA
+		{
+			int AId { get; set; }
+
+			IB B { get; set; }
+		}
+
+		private interface IB
+		{
+			int BId { get; set; }
+
+			IC C { get; set; }
+		}
+
+		private interface IC
+		{
+			int CId { get; set; }
+
+			ID D { get; set; }
+		}
+
+		private interface ID
+		{
+			int DId { get; set; }
+		}
+
+		private class A : IA
+		{
+			public int AId { get; set; }
+
+			public IB B { get; set; }
+		}
+
+		private class B : IB
+		{
+			public int BId { get; set; }
+
+			public IC C { get; set; }
+		}
+
+		private class C : IC
+		{
+			public int CId { get; set; }
+
+			public ID D { get; set; }
+		}
+
+		private class D : ID
+		{
+			public int DId { get; set; }
+		}
+
+		private sealed class ASubPropertyMap : ClassMap<IA>
+		{
+			public ASubPropertyMap()
+			{
+				Map(m => m.AId);
+				Map(m => m.B.BId);
+				Map(m => m.B.C.CId);
+				Map(m => m.B.C.D.DId);
+			}
+		}
+
+		private sealed class AMap : ClassMap<IA>
+		{
+			public AMap()
+			{
+				Map(m => m.AId);
+				References<BMap>(m => m.B);
+			}
+		}
+
+		private sealed class BMap : ClassMap<IB>
+		{
+			public BMap()
+			{
+				Map(m => m.BId);
+				References<CMap>(m => m.C);
+			}
+		}
+
+		private sealed class CMap : ClassMap<IC>
+		{
+			public CMap()
+			{
+				Map(m => m.CId);
+				References<DMap>(m => m.D);
+			}
+		}
+
+		private sealed class DMap : ClassMap<ID>
+		{
+			public DMap()
+			{
+				Map(m => m.DId);
+			}
+		}
 	}
 }

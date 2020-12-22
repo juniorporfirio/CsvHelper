@@ -14,9 +14,7 @@ namespace CsvHelper
 	/// </summary>
 	public class ObjectCreator
     {
-		private readonly Dictionary<int, Constructor[]> cache = new Dictionary<int, Constructor[]>();
-		private readonly HashSet<int> cachedTypes = new HashSet<int>();
-		private static readonly int objectHashCode = typeof(object).GetHashCode();
+		private readonly Dictionary<int, Func<object[], object>> cache = new Dictionary<int, Func<object[], object>>();
 
 		/// <summary>
 		/// Creates an instance of type T using the given arguments.
@@ -43,74 +41,49 @@ namespace CsvHelper
 		[MethodImpl(MethodImplOptions.AggressiveInlining)]
 		private Func<object[], object> GetFunc(Type type, object[] args)
 		{
-			var key = GetConstructorCacheKey(type, args.Length);
-			if (!cache.TryGetValue(key, out var constructors))
+			var argTypes = GetArgTypes(args);
+			var key = GetConstructorCacheKey(type, argTypes);
+			if (!cache.TryGetValue(key, out var func))
 			{
-				if (!cachedTypes.Contains(type.GetHashCode()))
-				{
-					CreateCache(type);
-				}
-
-				if (!cache.ContainsKey(key))
-				{
-					throw GetConstructorNotFoundException(type, args);
-				}
-
-				constructors = cache[key];
+				cache[key] = func = CreateInstanceFunc(type, argTypes);
 			}
 
-			var constructor = GetConstructor(constructors, type, args);
-
-			return constructor.Func;
+			return func;
 		}
 
 		[MethodImpl(MethodImplOptions.AggressiveInlining)]
-		private void CreateCache(Type type)
+		private static Type[] GetArgTypes(object[] args)
 		{
-			if (type.IsValueType)
+			var argTypes = new Type[args.Length];
+			for (var i = 0; i < args.Length; i++)
 			{
-				var key = GetConstructorCacheKey(type, 0);
-				var constructor = new Constructor(type, null);
-				cache[key] = new Constructor[] { constructor };
-			}
-			else
-			{
-				var constructors = type.GetConstructors(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-
-				var cache = new Dictionary<int, List<Constructor>>();
-				for (var i = 0; i < constructors.Length; i++)
-				{
-					var constructor = new Constructor(type, constructors[i]);
-
-					var key = GetConstructorCacheKey(type, constructor.ParameterTypeHashCodes.Length);
-					if (!cache.ContainsKey(key))
-					{
-						cache[key] = new List<Constructor>();
-					}
-
-					cache[key].Add(constructor);
-				}
-
-				foreach (var pair in cache)
-				{
-					this.cache[pair.Key] = pair.Value.ToArray();
-				}
+				argTypes[i] = args[i]?.GetType() ?? typeof(object);
 			}
 
-			cachedTypes.Add(type.GetHashCode());
+			return argTypes;
 		}
 
 		[MethodImpl(MethodImplOptions.AggressiveInlining)]
-		private static int GetConstructorCacheKey(Type type, int argsCount)
-		{ 
+		private static int GetConstructorCacheKey(Type type, Type[] args)
+		{
 #if !NET45
-			return HashCode.Combine(type, argsCount);
+			var hashCode = new HashCode();
+			hashCode.Add(type.GetHashCode());
+			for (var i = 0; i < args.Length; i++)
+			{
+				hashCode.Add(args[i].GetHashCode());
+			}
+
+			return hashCode.ToHashCode();
 #else
 			unchecked
 			{
 				var hash = 17;
 				hash = hash * 31 + type.GetHashCode();
-				hash = hash * 31 + argsCount.GetHashCode();
+				for (var i = 0; i < args.Length; i++)
+				{
+					hash = hash * 31 + (args[i].GetHashCode());
+				}
 
 				return hash;
 			}
@@ -118,18 +91,31 @@ namespace CsvHelper
 		}
 
 		[MethodImpl(MethodImplOptions.AggressiveInlining)]
-		private static Func<object[], object> CreateInstanceFunc(Type type, Type[] parameterTypes)
+		private static Func<object[], object> CreateInstanceFunc(Type type, Type[] argTypes)
 		{
 			var parameterExpression = Expression.Parameter(typeof(object[]), "args");
 
 			Expression body;
 			if (type.IsValueType)
 			{
+				if (argTypes.Length > 0)
+				{
+					throw GetConstructorNotFoundException(type, argTypes);
+				}
+
 				body = Expression.Convert(Expression.Default(type), typeof(object));
 			}
 			else
 			{
-				var constructor = type.GetConstructor(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance, null, parameterTypes, null);
+				var constructors = type.GetConstructors(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+				var constructor = GetConstructor(constructors, type, argTypes);
+
+				var parameters = constructor.GetParameters();
+				var parameterTypes = new Type[parameters.Length];
+				for (var i = 0; i < parameters.Length; i++)
+				{
+					parameterTypes[i] = parameters[i].ParameterType;
+				}
 
 				var arguments = new List<Expression>();
 				for (var i = 0; i < parameterTypes.Length; i++)
@@ -150,47 +136,44 @@ namespace CsvHelper
 		}
 
 		[MethodImpl(MethodImplOptions.AggressiveInlining)]
-		private static Constructor GetConstructor(Constructor[] constructors, Type type, object[] args)
+		private static ConstructorInfo GetConstructor(ConstructorInfo[] constructors, Type type, Type[] argTypes)
 		{
-			// Match the signature.
-
-			var argsTypeHashCodes = new int[args.Length];
-			for (var i = 0; i < args.Length; i++)
-			{
-				argsTypeHashCodes[i] = args[i]?.GetType().GetHashCode() ?? objectHashCode;
-			}
-
-			var fuzzyMatches = new List<Constructor>();
+			var matchType = MatchType.Exact;
+			var fuzzyMatches = new List<ConstructorInfo>();
 			for (var i = 0; i < constructors.Length; i++)
 			{
 				var constructor = constructors[i];
-				var matchType = MatchType.Exact;
+				var parameters = constructors[i].GetParameters();
 
-				for (var j = 0; j < args.Length; j++)
+				if (parameters.Length != argTypes.Length)
 				{
-					var parameterType = constructor.ParameterTypeHashCodes[j];
-					var argType = argsTypeHashCodes[j];
-					if (args[j] != null && parameterType == argType)
+					continue;
+				}
+
+				for (var j = 0; j < parameters.Length && j < argTypes.Length; j++)
+				{
+					var parameterType = parameters[j].ParameterType;
+					var argType = argTypes[j];
+
+					if (argType == parameterType)
 					{
-						// Constructor parameter and arg types match exactly.
+						matchType = MatchType.Exact;
 						continue;
 					}
 
-					if (args[j] == null && !constructor.ParameterTypes[j].IsValueType)
+					if (!parameterType.IsValueType && (parameterType.IsAssignableFrom(argType) || argType == typeof(object)))
 					{
-						// Constructor parameter is reference type and arg is null.
 						matchType = MatchType.Fuzzy;
 						continue;
 					}
 
-					// Constructor parameter type dosn't match arg type.
 					matchType = MatchType.None;
 					break;
 				}
 
 				if (matchType == MatchType.Exact)
 				{
-					// It's only possible to have a single exact match.
+					// Only possible to have one exact match.
 					return constructor;
 				}
 
@@ -210,54 +193,22 @@ namespace CsvHelper
 				throw new AmbiguousMatchException();
 			}
 
-			throw GetConstructorNotFoundException(type, args);
+			throw GetConstructorNotFoundException(type, argTypes);
 		}
 
 		[MethodImpl(MethodImplOptions.AggressiveInlining)]
-		private static MissingMethodException GetConstructorNotFoundException(Type type, object[] args)
+		private static MissingMethodException GetConstructorNotFoundException(Type type, Type[] argTypes)
 		{
-			var signature = $"{type.FullName}({string.Join(", ", args.Select(a => (a?.GetType() ?? typeof(object)).FullName))})";
-			return new MissingMethodException($"Constructor '{signature}' was not found.");
+			var signature = $"{type.FullName}({string.Join(", ", argTypes.Select(a => a.FullName))})";
+
+			throw new MissingMethodException($"Constructor '{signature}' was not found.");
 		}
 
 		private enum MatchType
 		{
 			None = 0,
 			Exact = 1,
-			Fuzzy = 2,
-		}
-
-		private class Constructor
-		{
-			public Func<object[], object> Func { get; private set; }
-
-			public Type[] ParameterTypes { get; private set; }
-
-			public int[] ParameterTypeHashCodes { get; private set; }
-
-			public Constructor(Type type, ConstructorInfo constructor)
-			{
-				if (type.IsValueType)
-				{
-					ParameterTypes = new Type[0];
-					ParameterTypeHashCodes = new int[0];
-				}
-				else
-				{
-					var parameters = constructor.GetParameters();
-
-					ParameterTypes = new Type[parameters.Length];
-					ParameterTypeHashCodes = new int[parameters.Length];
-
-					for (var i = 0; i < parameters.Length; i++)
-					{
-						ParameterTypes[i] = parameters[i].ParameterType;
-						ParameterTypeHashCodes[i] = parameters[i].ParameterType.GetHashCode();
-					}
-				}
-
-				Func = CreateInstanceFunc(type, ParameterTypes);
-			}
+			Fuzzy = 2
 		}
 	}
 }

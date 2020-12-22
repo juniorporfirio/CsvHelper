@@ -23,9 +23,8 @@ namespace CsvHelper.Expressions
 		public RecordManager(CsvReader reader)
 		{
 			this.reader = reader;
-			var resolver = ObjectResolver.Current;
-			recordCreatorFactory = resolver.Resolve<RecordCreatorFactory>(reader);
-			recordHydrator = resolver.Resolve<RecordHydrator>(reader);
+			recordCreatorFactory = reader.Context.ObjectResolver.Resolve<RecordCreatorFactory>(reader);
+			recordHydrator = reader.Context.ObjectResolver.Resolve<RecordHydrator>(reader);
 		}
 
 		/// <summary>
@@ -34,7 +33,7 @@ namespace CsvHelper.Expressions
 		/// <param name="writer">The writer.</param>
 		public RecordManager(CsvWriter writer)
 		{
-			recordWriterFactory = ObjectResolver.Current.Resolve<RecordWriterFactory>(writer);
+			recordWriterFactory = writer.Context.ObjectResolver.Resolve<RecordWriterFactory>(writer);
 		}
 
 		/// <summary>
